@@ -1,4 +1,4 @@
-export const BASE_LATEX_TEMPLATE =`\documentclass[10pt,a4paper]{article}
+export const BASE_LATEX_TEMPLATE =`\\documentclass[10pt,a4paper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1.5cm]{geometry}
 \usepackage{hyperref}
