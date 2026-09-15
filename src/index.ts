@@ -1,8 +1,10 @@
 import { BASE_LATEX_TEMPLATE } from "./template";
 
 export interface Env {
-  OPENAI_API_KEY: string;
+  AI: any; // Cloudflare Workers AI Binding
 }
+
+const AI_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -16,13 +18,6 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/api/optimize") {
       try {
-        if (!env.OPENAI_API_KEY) {
-          return new Response(JSON.stringify({ error: "OPENAI_API_KEY is not configured in Worker." }), {
-            status: 500,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-
         const body = await request.json() as { jobTitle?: string; jobDescription?: string };
         const { jobTitle, jobDescription } = body;
 
@@ -33,61 +28,50 @@ export default {
           });
         }
 
-        // استخراج الكلمات المفتاحية التخصصية من الوصف
-        const targetKeywords = await extractKeywords(jobTitle, jobDescription, env.OPENAI_API_KEY);
+        // 1. استخراج الكلمات المفتاحية عبر Workers AI
+        const targetKeywords = await extractKeywordsWorkersAI(env.AI, jobTitle, jobDescription);
 
         let currentLatex = BASE_LATEX_TEMPLATE;
         let iteration = 0;
         const maxIterations = 3;
         let report = evaluateATS(currentLatex, targetKeywords);
 
-        // حلقة المطابقة البرمجية حتى الوصول لـ 90% أو استنفاد المحاولات
+        // 2. حلقة المطابقة التكرارية الصادقة
         while (report.matchRate < 90 && iteration < maxIterations) {
           iteration++;
 
           const systemPrompt = `
 You are a deterministic ATS Optimization Specialist and LaTeX Architect.
-CRITICAL TRUTH & ACCURACY RULES:
-1. NEVER invent employers, job titles, university degrees, or unearned certifications.
-2. ONLY inject keywords if they can logically describe the existing technical stacks and operational achievements.
-3. Replace generic phrasing with industry-standard terminology (e.g. use "Infrastructure as Code", "Multi-AZ Failover", "Observability" where applicable to systems work).
-4. Remove all LaTeX math mode delimiters from acronyms (e.g., write CI/CD, not $CI/CD$; L2/L3, not $L2/L3$).
+CRITICAL TRUTH RULES:
+1. NEVER invent employers, job titles, degrees, or unearned certifications.
+2. ONLY inject keywords if they logically clarify existing technical stacks or operational achievements.
+3. Replace generic phrasing with industry-standard terminology (e.g. "Infrastructure as Code", "Multi-AZ", "Observability").
+4. Strip math-mode delimiters from acronyms (use CI/CD not $CI/CD$; L2/L3 not $L2/L3$).
 5. Preserve unified date ranges (Month YYYY -- Month YYYY).
-6. Return ONLY the raw valid LaTeX document with no markdown blocks, no backticks, and no commentary.
+6. Return ONLY the raw valid LaTeX document. No markdown formatting, no backticks, no conversational text.
 `;
 
           const userPrompt = `
 Target Job Title: ${jobTitle}
 Current ATS Match Rate: ${report.matchRate}%
 Target: >= 90%
-Missing Valid Keywords to prioritize: ${JSON.stringify(report.missingKeywords)}
+Missing Valid Keywords: ${JSON.stringify(report.missingKeywords)}
 
 Current Base LaTeX:
 ${currentLatex}
 `;
 
-          const res = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-            },
-            body: JSON.stringify({
-              model: "gpt-4o",
-              messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt },
-              ],
-              temperature: 0.1,
-            }),
+          const aiResponse = await env.AI.run(AI_MODEL, {
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0.1,
           });
 
-          const data = await res.json() as any;
-          if (!data.choices || !data.choices[0]) {
-            throw new Error("Invalid response from LLM engine.");
-          }
+          let candidateLatex: string = aiResponse.response ? aiResponse.response.trim() : "";
 
-          let candidateLatex = data.choices[0].message.content.trim();
+          // تنظيف أي markdown blocks قد يضيفها النموذج
           if (candidateLatex.startsWith("```latex")) {
             candidateLatex = candidateLatex.replace(/^```latex/, "").replace(/```$/, "").trim();
           } else if (candidateLatex.startsWith("```")) {
@@ -121,7 +105,7 @@ ${currentLatex}
   },
 };
 
-// فاحص حرفي صارم (Deterministic ATS Evaluator)
+// فاحص حرفي برمجي صارم (Deterministic Regex Evaluator)
 function evaluateATS(latexCode: string, keywords: string[]): {
   matchRate: number;
   matchedKeywords: string[];
@@ -138,7 +122,7 @@ function evaluateATS(latexCode: string, keywords: string[]): {
 
   for (const kw of keywords) {
     const cleanKw = kw.trim().toLowerCase();
-    if (plainText.includes(cleanKw)) {
+    if (cleanKw.length > 0 && plainText.includes(cleanKw)) {
       matchedKeywords.push(kw);
     } else {
       missingKeywords.push(kw);
@@ -152,33 +136,26 @@ function evaluateATS(latexCode: string, keywords: string[]): {
   return { matchRate, matchedKeywords, missingKeywords };
 }
 
-async function extractKeywords(title: string, jd: string, apiKey: string): Promise<string[]> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "Extract up to 25 core technical skills, exact compound phrases, and required competencies from the JD. Return JSON: { \"keywords\": string[] }",
-        },
-        {
-          role: "user",
-          content: `Job Title: ${title}\\n\\nJob Description:\\n${jd}`,
-        },
-      ],
-      temperature: 0.0,
-    }),
+// استخراج الكلمات المفتاحية باستخدام Workers AI
+async function extractKeywordsWorkersAI(ai: any, title: string, jd: string): Promise<string[]> {
+  const prompt = `
+Extract up to 20 high-impact technical keywords, hard skills, certifications, and compound terms from this JD for the job "${title}".
+Return ONLY a comma-separated list of terms, nothing else.
+
+JD:
+${jd}
+`;
+
+  const res = await ai.run(AI_MODEL, {
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.0,
   });
 
-  const data = await res.json() as any;
-  const parsed = JSON.parse(data.choices[0].message.content);
-  return parsed.keywords || [];
+  const rawText: string = res.response || "";
+  return rawText
+    .split(",")
+    .map((k: string) => k.replace(/[\n\r\-•*]/g, "").trim())
+    .filter((k: string) => k.length > 1);
 }
 
 function renderHTML(): string {
@@ -187,16 +164,16 @@ function renderHTML(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ATS Resume Tailorer</title>
+  <title>ATS Resume Tailorer (Workers AI)</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f8fafc; padding: 2rem; margin: 0; }
     .container { max-width: 900px; margin: auto; }
-    h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #60a5fa; }
+    h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #38bdf8; }
     label { display: block; margin-top: 1rem; margin-bottom: 0.4rem; font-weight: 600; font-size: 0.9rem; }
     input[type="text"], textarea { width: 100%; box-sizing: border-box; padding: 0.75rem; border-radius: 6px; border: 1px solid #1e293b; background: #111827; color: #fff; font-family: inherit; font-size: 0.95rem; }
     textarea { height: 180px; resize: vertical; }
-    button { margin-top: 1.5rem; width: 100%; padding: 0.8rem; border-radius: 6px; border: none; background: #2563eb; color: #fff; font-size: 1rem; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-    button:hover { background: #1d4ed8; }
+    button { margin-top: 1.5rem; width: 100%; padding: 0.8rem; border-radius: 6px; border: none; background: #0284c7; color: #fff; font-size: 1rem; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #0369a1; }
     .results { margin-top: 2rem; display: none; }
     .stats { display: flex; gap: 1rem; margin-bottom: 1rem; }
     .card { background: #111827; padding: 1rem; border-radius: 6px; flex: 1; text-align: center; border: 1px solid #1f2937; }
@@ -208,14 +185,14 @@ function renderHTML(): string {
 </head>
 <body>
   <div class="container">
-    <h1>نظام تحسين وتخصيص السيرة الذاتية لـ ATS (بدون تزييف)</h1>
+    <h1>نظام مواءمة السيرة الذاتية (Cloudflare Workers AI المجاني)</h1>
     <label for="jobTitle">اسم الوظيفة المستهدفة:</label>
-    <input type="text" id="jobTitle" placeholder="e.g. Senior DevOps Engineer / Cloud Operations Lead">
+    <input type="text" id="jobTitle" placeholder="e.g. Systems Engineer / Cloud Lead">
 
-    <label for="jobDescription">الوصف الوظيفي الكامل (Job Description):</label>
-    <textarea id="jobDescription" placeholder="الصق نص الـ JD هنا..."></textarea>
+    <label for="jobDescription">الوصف الوظيفي (Job Description):</label>
+    <textarea id="jobDescription" placeholder="الصق الـ JD هنا..."></textarea>
 
-    <button id="submitBtn" onclick="optimizeCV()">بدء المعالجة والتحسين التكراري</button>
+    <button id="submitBtn" onclick="optimizeCV()">تحليل ومطابقة عبر Workers AI</button>
 
     <div class="results" id="results">
       <div class="stats">
@@ -224,7 +201,7 @@ function renderHTML(): string {
           <span id="matchRate">0%</span>
         </div>
         <div class="card">
-          عدد دورات التحسين
+          دورات التحسين المنفذة
           <span id="iterationsRun">0</span>
         </div>
       </div>
@@ -246,17 +223,17 @@ function renderHTML(): string {
       const jobDescription = document.getElementById('jobDescription').value.trim();
 
       if (!jobTitle || !jobDescription) {
-        alert('يرجى إدخال اسم الوظيفة ووصفها');
+        alert("يرجى إدخال اسم الوظيفة ووصفها");
         return;
       }
 
       btn.disabled = true;
-      btn.innerText = 'جاري الفحص والمطابقة التكرارية...';
+      btn.innerText = "جاري المعالجة محلياً عبر Workers AI...";
 
       try {
-        const response = await fetch('/api/optimize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const response = await fetch("/api/optimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jobTitle, jobDescription })
         });
 
@@ -264,23 +241,23 @@ function renderHTML(): string {
         if (data.error) throw new Error(data.error);
 
         generatedLatex = data.tailoredLatex;
-        document.getElementById('matchRate').innerText = data.matchRate + '%';
-        document.getElementById('iterationsRun').innerText = data.iterationsRun;
-        document.getElementById('latexOutput').innerText = data.tailoredLatex;
-        results.style.display = 'block';
+        document.getElementById("matchRate").innerText = data.matchRate + "%";
+        document.getElementById("iterationsRun").innerText = data.iterationsRun;
+        document.getElementById("latexOutput").innerText = data.tailoredLatex;
+        results.style.display = "block";
       } catch (err) {
-        alert('حدث خطأ أثناء المعالجة: ' + err.message);
+        alert("خطأ: " + err.message);
       } finally {
         btn.disabled = false;
-        btn.innerText = 'بدء المعالجة والتحسين التكراري';
+        btn.innerText = "تحليل ومطابقة عبر Workers AI";
       }
     }
 
     function downloadLatex() {
-      const blob = new Blob([generatedLatex], { type: 'text/plain;charset=utf-8' });
-      const a = document.createElement('a');
+      const blob = new Blob([generatedLatex], { type: "text/plain;charset=utf-8" });
+      const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = 'tailored.tex';
+      a.download = "tailored.tex";
       a.click();
     }
   </script>
