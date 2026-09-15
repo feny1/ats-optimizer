@@ -1,4 +1,4 @@
-\documentclass[10pt,a4paper]{article}
+export const BASE_LATEX_TEMPLATE =`\documentclass[10pt,a4paper]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[margin=1.5cm]{geometry}
 \usepackage{hyperref}
@@ -107,4 +107,4 @@ Umm Al-Qura University, Makkah, Saudi Arabia \hfill \textbf{GPA: 3.60 / 4.00}
 \section*{Languages}
 \textbf{Arabic:} Native \quad\textbar\quad \textbf{English:} Professional (STEP: 78)
 
-\end{document}
+\end{document}`
