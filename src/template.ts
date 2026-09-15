@@ -107,4 +107,4 @@ Umm Al-Qura University, Makkah, Saudi Arabia \hfill \textbf{GPA: 3.60 / 4.00}
 \section*{Languages}
 \textbf{Arabic:} Native \quad\textbar\quad \textbf{English:} Professional (STEP: 78)
 
-\end{document}`
+\end{document}`;
